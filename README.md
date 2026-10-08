@@ -8,13 +8,36 @@ on kind's network serves the packaged local chart to Argo CD.
 ## Prerequisites
 
 - Nix with `nix-command` and `flakes` enabled.
-- A running Docker daemon (Docker Desktop on macOS), accessible without sudo.
+- A running Docker daemon, accessible without sudo (see macOS setup below).
 - Internet access for Nix packages, container images, and Argo CD manifests.
 - Enough resources for a Kubernetes node and Argo CD (roughly 4 CPUs / 6 GiB RAM).
 
 The flake installs kind, kubectl, Helm, Argo CD CLI, Docker client, make, and
-validation tools. It does **not** install or start the host Docker daemon.
+validation tools. On macOS it also installs Colima to run Docker in a Linux VM.
+On macOS, cluster/test startup automatically starts Colima if Docker is unavailable.
+An already-running Docker daemon (including Docker Desktop) is used as-is.
 The locked nixpkgs version also selects the matching Argo CD server version.
+
+### macOS Docker setup
+
+Inside `nix develop` (or after `direnv allow`), `make test` starts Colima when
+needed, with 4 CPUs, 6 GiB RAM, and a 30 GiB disk. It selects Colima only for the
+test process, without changing your saved Docker context.
+
+To start Colima manually and select it for other Docker commands:
+
+```bash
+colima start --runtime docker --cpu 4 --memory 6 --disk 30
+docker context use colima
+docker info
+make test
+```
+
+Alternatively, start Docker Desktop and use its Docker context instead.
+If `DOCKER_HOST` or `DOCKER_CONTEXT` is set in your shell, it may override the
+selected context; unset it if Docker connects to the wrong daemon.
+Use `colima stop` when finished; `make clean` only removes the demo resources.
+On Linux, install and start Docker through your host system configuration.
 
 ## Run
 

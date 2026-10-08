@@ -16,7 +16,7 @@
               pkgs.yq-go pkgs.kind pkgs.kubectl pkgs.kubernetes-helm
               pkgs.argocd pkgs.docker-client pkgs.direnv pkgs.nix-direnv
               pkgs.shellcheck pkgs.shfmt
-            ];
+            ] ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isDarwin [ pkgs.colima ];
             ARGOCD_VERSION = "v${pkgs.argocd.version}";
           };
         });
