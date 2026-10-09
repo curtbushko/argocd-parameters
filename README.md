@@ -1,146 +1,210 @@
-# Argo CD ApplicationSet parameters: live integration test
+# Argo CD bootstrap and parameter examples
 
-A local kind cluster runs Argo CD and a Helm-based hello-world application. The
-application serves a greeting rendered by Helm, not a hard-coded response.
-No external Git repository or chart publication is needed: a Docker container
-on kind's network serves the packaged local chart to Argo CD.
+A disposable kind cluster runs Argo CD, a local Git server pod, and this hierarchy:
+
+```text
+bootstrap (ApplicationSet → parent Application)
+├── dev-child-one (ApplicationSet → Application → OCI podinfo chart)
+├── dev-child-two (ApplicationSet → Application → OCI podinfo chart)
+└── dev-child-three (ApplicationSet → Application → OCI podinfo chart)
+```
+
+All children target the local cluster. The parent points at one Git directory
+containing multiple child ApplicationSets and manages no workloads itself.
+The Git hostname is supplied at runtime, not committed into source manifests.
 
 ## Prerequisites
 
-- Nix with `nix-command` and `flakes` enabled.
-- A running Docker daemon, accessible without sudo (see macOS setup below).
-- Internet access for Nix packages, container images, and Argo CD manifests.
-- Enough resources for a Kubernetes node and Argo CD (roughly 4 CPUs / 6 GiB RAM).
+- Nix with flakes enabled.
+- A running Docker daemon, accessible without sudo.
+- Internet access for Nix packages, images, Argo CD manifests, and Alpine packages.
+- Roughly 4 CPUs / 6 GiB RAM available for the cluster and Argo CD.
 
-The flake installs kind, kubectl, Helm, Argo CD CLI, Docker client, make, and
-validation tools. On macOS it also installs Colima to run Docker in a Linux VM.
-On macOS, cluster/test startup automatically starts Colima if Docker is unavailable.
-An already-running Docker daemon (including Docker Desktop) is used as-is.
-The locked nixpkgs version also selects the matching Argo CD server version.
-
-### macOS Docker setup
-
-Inside `nix develop` (or after `direnv allow`), `make test` starts Colima when
-needed, with 4 CPUs, 6 GiB RAM, and a 30 GiB disk. It selects Colima only for the
-test process, without changing your saved Docker context.
-
-To start Colima manually and select it for other Docker commands:
-
-```bash
-colima start --runtime docker --cpu 4 --memory 6 --disk 30
-docker context use colima
-docker info
-make test
-```
-
-Alternatively, start Docker Desktop and use its Docker context instead.
-If `DOCKER_HOST` or `DOCKER_CONTEXT` is set in your shell, it may override the
-selected context; unset it if Docker connects to the wrong daemon.
-Use `colima stop` when finished; `make clean` only removes the demo resources.
-On Linux, install and start Docker through your host system configuration.
+The development shell provides kind, kubectl, Helm, Argo CD CLI, Jsonnet, Docker
+client, make, and validation tools. On macOS it includes Colima; cluster startup
+starts Colima if Docker is unavailable. Docker Desktop also works.
 
 ## Run
 
 ```bash
 nix develop
 make test
+make ui
 ```
 
-Or enable direnv in your host shell, with nix-direnv integration, then:
+The UI is **https://localhost:18080**. Accept the self-signed certificate.
+`make ui` prints the current admin password and forwards the UI until Ctrl+C.
+Open Application **bootstrap** to see the three child ApplicationSets. Open
+**dev-child-one**, **dev-child-two**, or **dev-child-three** to see their workloads.
 
-```bash
-direnv allow
-make test
+The plain YAML bootstrap loads only `examples/application-sets/dev.jsonnet`.
+That file returns three ApplicationSets using one shared
+`application-set.libsonnet` template and independently pinned release versions.
+`staging.jsonnet`, `prod.jsonnet`, and `demo.jsonnet` remain undeployed examples.
+`registry` and `registryNamespace` are the TLAs for the OCI host and repository path. `ENVIRONMENT` controls names and cluster targeting;
+`ENVIRONMENT_VALUES` selects a filename inside the chart package. For example, demo
+can use dev settings without becoming a dev deployment.
+See [`examples/bootstrap/README.md`](examples/bootstrap/README.md) for details
+and deployment against your own Git host.
+
+## How rendering works
+
+There are three rendering steps, each with a different job:
+
+1. **Jsonnet creates ApplicationSets.** The bootstrap Application reads
+   `dev.jsonnet`, passes in `registry` and `registryNamespace`, and imports
+   `application-set.libsonnet`. The result is an array of three ApplicationSets.
+2. **ApplicationSet creates Applications.** Each child selects the dev cluster.
+   The controller fills in generator values such as `{{.server}}` and `{{.name}}`.
+3. **Helm creates workload manifests.** Each Application downloads its pinned OCI
+   chart, merges the chart values and overrides, and renders Kubernetes resources.
+
+The bootstrap manages only the child ApplicationSets—not the workloads directly.
+Only `dev.jsonnet` is selected; staging and prod are examples, not deployed.
+
+```mermaid
+flowchart TD
+    B["bootstrap.yaml: ApplicationSet"] --> A["bootstrap: parent Application"]
+    A --> D["dev.jsonnet + registry/registryNamespace TLAs"]
+    T["application-set.libsonnet: shared template"] --> D
+    D --> S["Three dev ApplicationSets"]
+    C["Cluster registration: environment=dev"] --> S
+    S --> P["Three child Applications"]
+    O["OCI registry: pinned chart packages"] --> P
+    P --> H["Helm: values.yaml + selected values file"]
+    H --> K["Deployments, Services, and other workloads"]
 ```
 
-For example, a Nix Home Manager setup can enable both:
+### Environment files: `dev.jsonnet` versus chart `dev.yaml`
 
-```nix
-programs.direnv.enable = true;
-programs.direnv.nix-direnv.enable = true;
+These files serve different purposes:
+
+| File | Purpose |
+| --- | --- |
+| `examples/application-sets/dev.jsonnet` | Lists dev releases and their chart/version pins. |
+| `staging.jsonnet` / `prod.jsonnet` | Independent release lists for later environments. |
+| `demo.jsonnet` | Demo environment identity with the dev values profile. |
+| Chart `values.yaml` | Packaged defaults: image version, resources, replicas, and other settings. |
+| Chart `dev.yaml`, `staging.yaml`, etc. | Optional packaged overrides for that environment. |
+
+Each release list defines identity and the values filename separately:
+
+```jsonnet
+local ENVIRONMENT = 'demo';
+local ENVIRONMENT_VALUES = 'dev.yaml';
 ```
 
-The `.envrc` uses `use flake`; direnv must already be hooked into your host shell.
-Installing it inside the development shell does not configure that host hook.
+This creates `demo-*` resources and targets demo clusters, but loads the chart's
+`dev.yaml`. The generic helper takes both arguments independently:
+
+```jsonnet
+applicationSet(registry, registryNamespace, environment, environmentValues, release)
+```
+
+Its Helm configuration selects the exact filename, without inferring it from
+the environment name:
+
+```jsonnet
+helm: {
+  releaseName: APP_NAME,
+  valueFiles: [environmentValues],
+},
+```
+
+Neither argument is injected into `.Values`: `environment` is for resource names
+and cluster selection, while `environmentValues` is for file selection.
+Helm **automatically loads chart `values.yaml`**, then applies the selected file.
+For demo selecting dev settings, that means **`values.yaml` → `dev.yaml`**.
+Inline values and parameters, if added later, take precedence over these files.
+
+The selected file must exist inside that version of the chart package. A file
+next to `dev.jsonnet` in Git is not automatically available to an OCI chart.
+Missing files fail rendering; the demo does not silently ignore them.
+
+The runnable dev example selects **`values.yaml`**, because public podinfo does
+not package `dev.yaml`. This reapplies the chart's defaults without overrides.
+The undeployed demo/staging/prod examples illustrate `dev.yaml`, `staging.yaml`,
+and `prod.yaml`; replace their chart pins with your own chart that contains those
+files before deploying them. No local registry or repackaging is required.
+Changing settings inside a packaged file requires publishing a new chart version.
+
+### Where versions change and how promotion works
+
+Edit the release entry in the relevant environment file—not the shared template
+or bootstrap:
+
+```jsonnet
+// examples/application-sets/dev.jsonnet
+{ name: 'child-one', chart: 'podinfo', version: '6.9.2' },
+```
+
+To promote that release, update only its corresponding version in
+`examples/application-sets/staging.jsonnet`, then later in `prod.jsonnet`.
+Other releases and environments keep their existing pins. Reuse of the template
+is unaffected by different versions.
+
+`version` selects the **chart package version**. Image versions and deployment
+settings remain in that package. Use the exact published chart version; don't
+add a `v` prefix unless it is part of the published version.
+
+For this local demo, run `make bootstrap` after editing dev to refresh the Git
+snapshot. Tests currently expect podinfo 6.9.2; update their expected chart/image
+version in `examples/bootstrap/test.sh` and HTTP version in
+`scripts/bootstrap.sh` if you change that demo pin. Staging/prod are not tested
+or deployed until you deliberately configure their bootstrap selection and
+matching cluster registrations.
 
 ## What the test proves
 
-1. Creates the `argocd-parameters` cluster with a private `.state/kubeconfig`.
-2. Packages `charts/hello-world` and starts the local HTTP Helm repository.
-3. Installs Argo CD and waits for its controllers and API.
-4. Adds `applicationset.yaml` with `argocd appset create`.
-5. Asserts the default response from the actual running application.
-6. Adds `message` and `audience` Helm parameters to the ApplicationSet template
-   using `argocd appset create .state/applicationset.json --upsert`.
-7. Waits for those parameters to reach the generated Application, deployment,
-   and HTTP response.
-8. Changes the parameters again and checks the updated response.
+1. Creates or reuses the `argocd-parameters` cluster with `.state/kubeconfig`.
+2. Installs Argo CD and waits for controllers and the API.
+3. Renders only dev, pulls podinfo 6.9.2, and verifies packaged chart defaults.
+4. Copies the local example files into a mounted archive. A Git server pod's
+   init container commits them into a disposable bare repository.
+5. Deploys ApplicationSet **bootstrap**, whose Application fetches one directory
+   and creates **dev-child-one**, **dev-child-two**, and **dev-child-three**.
+6. Waits for the parent to sync to the current Git revision and for each child to
+   deploy the OCI chart version, then checks all three HTTP greetings.
 
-Expected successful assertions:
+Expected live assertion:
 
 ```text
-PASS: running application returned: Hello world | audience=default
-PASS: running application returned: Hello from Argo CD parameters | audience=kind
-PASS: running application returned: Hello after a parameter update | audience=integration-test
+PASS: bootstrap -> dev-child-one, dev-child-two, dev-child-three -> OCI chart defaults; staging/prod not deployed
 ```
 
-Argo CD has no `appset set --parameter` command. The supported CLI operation is
-an ApplicationSet upsert with `spec.template.spec.source.helm.parameters`.
-Using `argocd app set hello-world -p ...` instead would change only the generated
-Application, which the ApplicationSet controller may overwrite.
-
-The chart renders these values into a ConfigMap. A checksum annotation changes
-the pod template when either parameter changes, so verification includes a
-real rollout. `curl` verifies the served content, not just the Kubernetes spec.
-
-## Argo CD UI
-
-Run `make ui` to display the admin credentials and forward the UI to
-**https://localhost:18080**. Accept the self-signed certificate warning.
-Keep the command running; press Ctrl+C to stop forwarding.
-Use `make ui ARGOCD_PORT=28080` to choose another port.
-
-## Inspect the running application
-
-The cluster stays running after the test; temporary port forwards stop.
-In the development shell:
-
-```bash
-export KUBECONFIG="$PWD/.state/kubeconfig"
-kubectl -n argocd get applicationset hello-world -o yaml
-kubectl -n argocd get application hello-world -o yaml
-kubectl -n hello-world get configmap hello-world -o yaml
-kubectl -n hello-world port-forward svc/hello-world 18081:80
-```
-
-From another terminal:
-
-```bash
-curl http://127.0.0.1:18081/
-```
-
-Saved evidence:
-
-- `.state/applicationset-result.yaml`: final ApplicationSet from the Argo CD API.
-- `.state/rendered-manifests.yaml`: final Helm-rendered manifests from Argo CD.
-- `.state/*port-forward.log`: port-forward diagnostics.
-
-Use `ARGOCD_PORT=28080 HELLO_PORT=28081 make test` if default ports are occupied.
-Re-running `make test` resets the baseline and repeats both parameter changes.
+No external Git publication or chart push is needed. The demo downloads the
+existing public OCI chart and podinfo container images from GHCR. Only public example files are
+copied into the Git pod, never kubeconfigs or CLI credentials. Rerun
+`make bootstrap` after changing local files to refresh the repository snapshot.
 
 ## Other targets
 
 ```bash
-make ui        # Show admin credentials and forward the UI to localhost
-make lint      # ShellCheck, shfmt, Helm lint and template
-make cluster   # Only create/export the kind cluster
-make repo      # Create cluster and serve the local chart
+make bootstrap # Refresh/test bootstrap on an existing demo cluster
+make ui        # Print credentials and forward the UI
+make lint      # ShellCheck, shfmt, Jsonnet and OCI Helm rendering tests
+make cluster   # Create/export the kind cluster
 make install   # Create cluster and install Argo CD
-make clean     # Delete the demo cluster and owned chart container
+make clean     # Delete the demo cluster
 ```
 
-This is a disposable local test, not a production configuration: it uses the
-initial admin credential, accepts Argo CD's self-signed certificate, and serves
-the chart over HTTP on Docker's kind network. Port forwards bind only localhost.
-Credentials stay under the ignored, restricted `.state/` directory; do not
-publish that directory. `make clean` preserves local evidence and credentials.
+Use `make ui ARGOCD_PORT=28080` if port 18080 is occupied.
+Stop the UI before `make clean`. Cleaning deletes the cluster, not `.state`;
+a fresh cluster has a new admin password.
+
+## Local setup and safety
+
+On macOS, start Colima manually if needed:
+
+```bash
+colima start --runtime docker --cpu 4 --memory 6 --disk 30
+docker context use colima
+```
+
+Or use direnv with nix-direnv and run `direnv allow`; `.envrc` uses `use flake`.
+Installing direnv in the dev shell does not install your host shell hook.
+
+This is not a production configuration: it uses the initial admin credential,
+self-signed TLS, and an unauthenticated read-only Git protocol server inside the
+cluster. Port forwards bind only localhost. `.state` is ignored and restricted;
+do not publish it. `make clean` preserves local evidence and credentials.

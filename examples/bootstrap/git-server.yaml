@@ -1,0 +1,75 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: bootstrap-git
+  namespace: argocd
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: bootstrap-git
+  template:
+    metadata:
+      labels:
+        app: bootstrap-git
+    spec:
+      automountServiceAccountToken: false
+      initContainers:
+        - name: initialize-repository
+          image: alpine/git:v2.49.1
+          command: [/bin/sh, -ec]
+          args:
+            - |
+              mkdir -p /work/source
+              tar -xzf /input/source.tgz -C /work/source
+              git -C /work/source init -b main
+              git -C /work/source config user.name 'Local demo'
+              git -C /work/source config user.email 'demo@example.invalid'
+              git -C /work/source add examples
+              git -C /work/source commit -m 'Bootstrap example snapshot'
+              git clone --bare /work/source /repos/demo.git
+          volumeMounts:
+            - name: source
+              mountPath: /input
+              readOnly: true
+            - name: work
+              mountPath: /work
+            - name: repository
+              mountPath: /repos
+      containers:
+        - name: git
+          image: alpine/git:v2.49.1
+          command: [/bin/sh, -ec]
+          args:
+            - |
+              apk add --no-cache git-daemon
+              exec git daemon --reuseaddr --base-path=/repos --export-all --verbose --listen=0.0.0.0 /repos
+          ports:
+            - containerPort: 9418
+          readinessProbe:
+            tcpSocket:
+              port: 9418
+          volumeMounts:
+            - name: repository
+              mountPath: /repos
+              readOnly: true
+      volumes:
+        - name: source
+          configMap:
+            name: bootstrap-git-source
+        - name: work
+          emptyDir: {}
+        - name: repository
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: bootstrap-git
+  namespace: argocd
+spec:
+  selector:
+    app: bootstrap-git
+  ports:
+    - port: 9418
+      targetPort: 9418

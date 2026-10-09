@@ -1,0 +1,42 @@
+# The demo script fills blank runtime values before applying this ApplicationSet.
+# For manual creation, supply your repoURL and the child Jsonnet TLA values.
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: bootstrap
+  namespace: argocd
+spec:
+  goTemplate: true
+  goTemplateOptions: ["missingkey=error"]
+  generators:
+    - git:
+        repoURL: ""
+        revision: HEAD
+        directories:
+          - path: examples/application-sets
+  template:
+    metadata:
+      name: bootstrap
+    spec:
+      project: default
+      source:
+        repoURL: ""
+        targetRevision: HEAD
+        path: examples/application-sets
+        directory:
+          include: dev.jsonnet
+          jsonnet:
+            tlas:
+              - name: registry
+                value: ""
+                code: false
+              - name: registryNamespace
+                value: ""
+                code: false
+      destination:
+        server: https://kubernetes.default.svc
+        namespace: argocd
+      syncPolicy:
+        automated:
+          prune: true
+          selfHeal: true

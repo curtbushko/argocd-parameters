@@ -1,0 +1,15 @@
+# Label the in-cluster registration so children target only this demo cluster.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: bootstrap-local-cluster
+  namespace: argocd
+  labels:
+    argocd.argoproj.io/secret-type: cluster
+    bootstrap-demo: "true"
+    environment: dev
+type: Opaque
+stringData:
+  name: in-cluster
+  server: https://kubernetes.default.svc
+  config: '{}'

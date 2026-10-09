@@ -1,5 +1,5 @@
 {
-  description = "Local Argo CD ApplicationSet Helm parameter integration test";
+  description = "Local Argo CD bootstrap and OCI Helm ApplicationSet demo";
 
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
 
@@ -15,7 +15,7 @@
               pkgs.bash pkgs.coreutils pkgs.gnumake pkgs.curl pkgs.jq
               pkgs.yq-go pkgs.kind pkgs.kubectl pkgs.kubernetes-helm
               pkgs.argocd pkgs.docker-client pkgs.direnv pkgs.nix-direnv
-              pkgs.shellcheck pkgs.shfmt
+              pkgs.shellcheck pkgs.shfmt pkgs.jsonnet
             ] ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isDarwin [ pkgs.colima ];
             ARGOCD_VERSION = "v${pkgs.argocd.version}";
           };
